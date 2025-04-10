@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 
 # Import the "frontend" patch tokenizer
-from src.tokenizers.patch_embedding import PatchEmbedding
+from src.tokenizers.base_patch_embedding import BasePatchEmbedding
 
 ########################################################################
 # TransformerSeqEncoder
@@ -99,9 +99,7 @@ class VisionTransformer(nn.Module):
 
     def __init__(
         self,
-        img_size=32,
-        patch_size=4,
-        in_channels=3,
+        patch_embed: BasePatchEmbedding,
         embed_dim=128,
         depth=6,
         n_heads=4,
@@ -109,9 +107,8 @@ class VisionTransformer(nn.Module):
         num_classes=10
     ):
         super().__init__()
-        self.patch_embed = PatchEmbedding(
-            img_size, patch_size, in_channels, embed_dim
-        )
+        self.patch_embed = patch_embed
+        embed_dim = patch_embed.proj.out_channels
         self.encoder = TransformerSeqEncoder(
             input_dim=embed_dim,
             max_len=self.patch_embed.n_patches,
