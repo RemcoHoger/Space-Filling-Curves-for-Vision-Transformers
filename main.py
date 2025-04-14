@@ -17,6 +17,7 @@ from torch.utils.data import DataLoader
 import torch.nn as nn
 import torch.optim as optim
 
+from src.tokenizers.hilbert_embedding import HilbertEmbedding
 from src.tokenizers.zigzag_embedding import ZigzagEmbedding
 from src.models.vit import VisionTransformer
 from src.training.scheduler import WarmupCosineScheduler
@@ -39,7 +40,7 @@ def main():
     train_loader = DataLoader(train_set, batch_size=64, shuffle=True)
     test_loader = DataLoader(test_set, batch_size=64, shuffle=False)
 
-    patch_embed = ZigzagEmbedding(
+    patch_embed = HilbertEmbedding(
         img_size=32,
         patch_size=4,
         in_channels=3,
