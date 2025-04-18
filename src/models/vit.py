@@ -41,9 +41,13 @@ class TransformerSeqEncoder(nn.Module):
         self.transformer = nn.TransformerEncoder(
             encoder_layer, num_layers=n_layers)
 
+        # initialize the learnable [CLS] token
         self.cls_token = nn.Parameter(torch.zeros(1, 1, input_dim))
+
+        # initialize the positional encoding
         patch_encoding = self._sinusoidal_positional_embedding(
             torch.arange(max_len), input_dim, method)
+        # make sure the [CLS] token is at the beginning and is initialized to 0
         cls_row = torch.zeros(1, input_dim, device=patch_encoding.device,
                               dtype=patch_encoding.dtype)
         self.register_buffer("pos_embed", torch.cat(
@@ -59,7 +63,7 @@ class TransformerSeqEncoder(nn.Module):
             w == pos.size(0), "pos must be a perfect square for 2D embedding"
         assert dim % 2 == 0, "feature dimension must be even for GFPE sincos embedding"
 
-        # Use GFPE-style encoding if using HilbertEmbedding
+        # Use encoding as introduced in the GFPE-ViT paper
         if isinstance(method, HilbertEmbedding):
             hilbert_indices = method.hilbert_indices
             n = hilbert_indices.numel()
@@ -72,10 +76,10 @@ class TransformerSeqEncoder(nn.Module):
                 dim//2, dtype=torch.float32).unsqueeze(0)  # (1, d/2)
             two_pi = 2 * math.pi
 
-            # scale  = (2*i * N^2 * pos * 2π) / (T * n * d)
+            # scale  = (2*i * N^2 * pos * 2pi) / (T * n * d)
             scale = (2.0 * i_ar * N ** 2 * pos * two_pi) / (T * n * dim)
 
-            # phase = h * (2*i * pos * 2π) / d
+            # phase = h * (2*i * pos * 2pi) / d
             phase = h_param * (2.0 * i_ar * pos * two_pi) / dim
 
             arg = scale + phase  # (n, d/2)
@@ -100,6 +104,9 @@ class TransformerSeqEncoder(nn.Module):
     def forward(self, x):
         """
         Forward pass to encode the input sequence.
+        B = batch size,
+        N = Number of patches,
+        D = Embedding dimension.
 
         Args:
             x (torch.Tensor): Input tensor of shape [B, N, D].
@@ -186,6 +193,10 @@ class VisionTransformer(nn.Module):
 
         Args:
             x (torch.Tensor): Input tensor of shape [B, C, H, W].
+                B = batch size,
+                C = number of channels,
+                H = height,
+                W = width.
 
         Returns:
             torch.Tensor: Output logits of shape [B, num_classes].
