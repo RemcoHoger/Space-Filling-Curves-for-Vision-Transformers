@@ -1,8 +1,10 @@
 import torch
+import math
 import torch.nn as nn
 
 # Import the "frontend" patch tokenizer
 from src.tokenizers.base_patch_embedding import BasePatchEmbedding
+from src.tokenizers.hilbert_embedding import HilbertEmbedding
 
 ########################################################################
 # TransformerSeqEncoder
@@ -22,9 +24,13 @@ class TransformerSeqEncoder(nn.Module):
         n_layers (int): Number of Transformer encoder layers.
     """
 
-    def __init__(self, input_dim, max_len, n_head, hidden_dim,
+    def __init__(self, input_dim, max_len, n_head, hidden_dim, method,
                  dropout_p=0.1, n_layers=1):
         super().__init__()
+        self.max_len = max_len
+        self.grid_size = int(math.sqrt(max_len))
+        assert self.grid_size ** 2 == max_len, "max_len must be a perfect square."
+
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=input_dim,
             nhead=n_head,
@@ -34,8 +40,62 @@ class TransformerSeqEncoder(nn.Module):
         )
         self.transformer = nn.TransformerEncoder(
             encoder_layer, num_layers=n_layers)
+
         self.cls_token = nn.Parameter(torch.zeros(1, 1, input_dim))
-        self.pos_embed = nn.Parameter(torch.zeros(1, max_len + 1, input_dim))
+        patch_encoding = self._sinusoidal_positional_embedding(
+            torch.arange(max_len), input_dim, method)
+        cls_row = torch.zeros(1, input_dim, device=patch_encoding.device,
+                              dtype=patch_encoding.dtype)
+        self.register_buffer("pos_embed", torch.cat(
+            [cls_row, patch_encoding], dim=0))
+
+        self.to_patch_embedding = method
+
+    def _sinusoidal_positional_embedding(self, pos, dim, method,
+                                         temperature=10000, dtype=torch.float32,
+                                         T=4, h_param=3.0):
+        h = w = int(math.sqrt(pos.size(0)))
+        assert h * \
+            w == pos.size(0), "pos must be a perfect square for 2D embedding"
+        assert dim % 2 == 0, "feature dimension must be even for GFPE sincos embedding"
+
+        # Use GFPE-style encoding if using HilbertEmbedding
+        if isinstance(method, HilbertEmbedding):
+            hilbert_indices = method.hilbert_indices
+            n = hilbert_indices.numel()
+            N = int(math.sqrt(n))
+            assert N*N == n
+            assert dim % 2 == 0
+
+            pos = hilbert_indices.to(torch.float32).unsqueeze(1)  # (n,1)
+            i_ar = torch.arange(
+                dim//2, dtype=torch.float32).unsqueeze(0)  # (1, d/2)
+            two_pi = 2 * math.pi
+
+            # scale  = (2*i * N^2 * pos * 2π) / (T * n * d)
+            scale = (2.0 * i_ar * N ** 2 * pos * two_pi) / (T * n * dim)
+
+            # phase = h * (2*i * pos * 2π) / d
+            phase = h_param * (2.0 * i_ar * pos * two_pi) / dim
+
+            arg = scale + phase  # (n, d/2)
+            pe_sin = torch.sin(arg)
+            pe_cos = torch.cos(arg)
+            pe = torch.cat([pe_sin, pe_cos], dim=1)  # (n, d)
+
+            return pe.type(dtype)
+
+        # Default: classic sincos
+        y, x = torch.meshgrid(torch.arange(h), torch.arange(w), indexing="ij")
+        y = y.flatten()[:, None]
+        x = x.flatten()[:, None]
+        omega = torch.arange(dim // 4) / (dim // 4 - 1)
+        omega = 1.0 / (temperature ** omega)
+        y = y * omega
+        x = x * omega
+        pe = torch.cat((x.sin(), x.cos(), y.sin(), y.cos()), dim=1)
+
+        return pe.type(dtype)
 
     def forward(self, x):
         """
@@ -51,9 +111,9 @@ class TransformerSeqEncoder(nn.Module):
         cls_tokens = self.cls_token.expand(B, -1, -1)  # [B, 1, D]
         x = torch.cat((cls_tokens, x), dim=1)          # [B, N+1, D]
         # add positional embeddings
-        x = x + self.pos_embed[:, :x.size(1)]
-        x = self.transformer(x)                        # transformer encoding
-        return x[:, 0]  # Return the [CLS] token
+        x = x + self.pos_embed[:x.size(1), :]  # [B, N, D]
+        x = self.transformer(x)  # transformer encoding
+        return x[:, 0]  # return [CLS] token
 
 
 ########################################################################
@@ -112,6 +172,7 @@ class VisionTransformer(nn.Module):
         self.encoder = TransformerSeqEncoder(
             input_dim=embed_dim,
             max_len=self.patch_embed.n_patches,
+            method=self.patch_embed,
             n_head=n_heads,
             hidden_dim=mlp_dim,
             n_layers=depth
@@ -131,5 +192,5 @@ class VisionTransformer(nn.Module):
         """
         x = self.patch_embed(x)  # Convert image to patch embeddings
         x = self.encoder(x)      # Encode patches using Transformer
-        x = self.mlp_head(x)     # Classify using MLP head
+        x = self.mlp_head(x)  # Classify using linear head
         return x

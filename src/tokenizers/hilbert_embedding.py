@@ -1,4 +1,5 @@
 import numpy as np
+import torch
 import torch.nn as nn
 from functools import cache
 from .base_patch_embedding import BasePatchEmbedding
@@ -19,7 +20,27 @@ class HilbertEmbedding(BasePatchEmbedding):
             kernel_size=patch_size,
             stride=patch_size
         )
+        self.img_size = img_size
         self.n_patches = (img_size // patch_size) ** 2
+        self.grid_size = img_size // patch_size
+        self.hilbert_indices = self._get_hilbert_indices(self.grid_size)
+
+    def _get_hilbert_indices(self, grid_size):
+        """
+        Computes the flattened Hilbert curve indices for a given grid size.
+
+        Args:
+            grid_size (int): The size of the grid (H/patch_size or W/patch_size).
+
+        Returns:
+            torch.Tensor: Flattened Hilbert curve indices.
+        """
+        order = int(np.log2(grid_size))  # Assuming grid_size is a power of 2
+        hilbert_points = self.hilbert_curve(order)
+        hilbert_indices = [(int(x * grid_size), int(y * grid_size))
+                           for x, y in hilbert_points]
+        hilbert_flat_indices = [i * grid_size + j for i, j in hilbert_indices]
+        return torch.tensor(hilbert_flat_indices, dtype=torch.long)
 
     def hilbert_curve(self, order, size=1.0):
         """
@@ -61,14 +82,9 @@ class HilbertEmbedding(BasePatchEmbedding):
         """
         x = self.proj(x)  # [B, embed_dim, H/patch_size, W/patch_size]
         B, C, H, W = x.shape
-        order = int(np.log2(H))  # Assuming H == W and is a power of 2
-        hilbert_indices = self.hilbert_curve(order)
-        hilbert_indices = [(int(x * H), int(y * W))
-                           for x, y in hilbert_indices]
 
-        # Rearrange patches according to the Hilbert curve
+        # Rearrange patches according to the precomputed Hilbert curve
         x = x.permute(0, 2, 3, 1)  # [B, H/patch_size, W/patch_size, embed_dim]
         x = x.reshape(B, H * W, C)  # Flatten spatial dimensions
-        hilbert_flat_indices = [i * W + j for i, j in hilbert_indices]
-        x = x[:, hilbert_flat_indices, :]  # Reorder patches
+        x = x[:, self.hilbert_indices, :]  # Reorder patches
         return x
