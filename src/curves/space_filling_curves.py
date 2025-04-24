@@ -52,10 +52,8 @@ def onion_curve(order, size=1.0):
 
         return coords
 
-    # Generate integer coordinates
+    # Generate and scale the coordinates
     integer_coords = generate_coords(order)
-
-    # Scale coordinates to the requested size
     cell_size = size / order
     scaled_points = [(x * cell_size + cell_size / 2,
                      y * cell_size + cell_size / 2)
@@ -253,19 +251,41 @@ def moore_curve(order, size=1.0):
 
 def find_hamiltonian_path(width, height, adjacency_order=None):
     """
-    Find a Hamiltonian path on the width×height grid, allowing
-    8-way moves but giving diagonal moves lower priority.
+    Attempt to find a Hamiltonian path on a 2D grid with 8-way connectivity.
+
+    This function uses a depth-first search (DFS) strategy to construct a
+    Hamiltonian path that visits every cell in a width x height grid exactly
+    once. It supports optional priority ordering of traversal based on a
+    provided adjacency_order.
+
+    Diagonal neighbors are permitted but deprioritized unless needed.
+    The algorithm also includes pruning based on flood-fill reachability to
+    improve performance.
+
+    Args:
+        width (int): Width of the grid.
+        height (int): Height of the grid.
+        adjacency_order (dict[Tuple[int, int], int], optional): Mapping of grid
+            coordinates to priority values for neighbor sorting.
+            Lower values are higher priority.
+
+    Returns:
+        List[Tuple[int, int]] | None: A list of coordinates representing
+                                      a Hamiltonian path,
+                                      or None if no path was found.
     """
     sys.setrecursionlimit(10_000_000)
     total = width * height
 
-    # visited flags: 2D list for clarity (could swap in a flat bitarray if desired)
+    # Initialize visited grid and path
     visited = [[False] * height for _ in range(width)]
     path = []
 
-    # --- 1) precompute all 8 neighbors per cell ---
+    # Precompute static neighbors for each cell. A static neighbor is one
+    # that is always a neighbor, regardless of the current path.
+    # This is used to speed up the flood-fill check.
     dirs_cardinal = [(1, 0), (-1, 0), (0, 1), (0, -1)]
-    dirs_diag     = [(1, 1), (1, -1), (-1, 1), (-1, -1)]
+    dirs_diag = [(1, 1), (1, -1), (-1, 1), (-1, -1)]
     static_nbrs = {}
     for x in range(width):
         for y in range(height):
@@ -277,20 +297,44 @@ def find_hamiltonian_path(width, height, adjacency_order=None):
             static_nbrs[(x, y)] = nbrs
 
     def get_neighbors(x, y):
+        """
+        Get neighbors of (x, y) in a specific order:
+        1) cardinal neighbors first, then diagonal
+        2) sort by adjacency_order if provided
+        3) sort by diagonal vs. cardinal
+        4) sort by adjacency_order if provided
+
+        This function returns a sorted list of neighbors for the given
+        coordinates (x, y). The sorting is based on the adjacency_order
+        """
         nbrs = list(static_nbrs[(x, y)])
-        # key: (is_diagonal, adjacency_score)
+
         def key_fn(v):
+            """
+            Custom key function for sorting neighbors.
+            """
             dx = abs(v[0] - x)
             dy = abs(v[1] - y)
             is_diag = 1 if dx == 1 and dy == 1 else 0
-            # within each group, respect adjacency_order if given
             score = adjacency_order.get(v, total) if adjacency_order else 0
             return (is_diag, score)
         nbrs.sort(key=key_fn)
         return nbrs
 
     def flood_check(sx, sy, remaining):
-        """Quick flood-fill on unvisited cardinal+diagonal graph."""
+        """
+        Heuristic to check if there are enough reachable cells from (sx, sy)
+        to complete the Hamiltonian path. This is a check which
+        counts the number of reachable cells from (sx, sy) that are not
+        already visited. If the count is less than the remaining cells
+        needed to complete the path, we can prune this branch of the search.
+        Args:
+            sx (int): Starting x-coordinate.
+            sy (int): Starting y-coordinate.
+            remaining (int): Number of remaining cells to visit.
+        Returns:
+            bool: True if there are enough reachable cells, False otherwise.
+        """
         stack = [(sx, sy)]
         seen = {(sx, sy)}
         cnt = 0
@@ -306,14 +350,25 @@ def find_hamiltonian_path(width, height, adjacency_order=None):
         return cnt >= remaining
 
     def dfs(x, y):
+        """
+        Depth-first search to find Hamiltonian path.
+
+        Args:
+            x (int): Current x-coordinate.
+            y (int): Current y-coordinate.
+
+        Returns:
+            bool: True if a Hamiltonian path is found, False otherwise.
+        """
         if len(path) == total:
             return True
 
-        # 2) only unvisited neighbors, in our new priority order
+        # Get unvisited neighbors
         nbrs = [(nx, ny) for nx, ny in get_neighbors(x, y)
                 if not visited[nx][ny]]
 
-        # 3) bridge/forced-move logic stays the same
+        # Bridge pruning: if there are no unvisited neighbors,
+        # we can prune this branch
         forced, filtered = [], []
         for nx, ny in nbrs:
             exits = 0
@@ -327,6 +382,7 @@ def find_hamiltonian_path(width, height, adjacency_order=None):
             filtered.append((nx, ny))
         nbrs = forced or filtered
 
+        # If no neighbors, we can't proceed
         for nx, ny in nbrs:
             visited[nx][ny] = True
             path.append((nx, ny))
@@ -341,7 +397,9 @@ def find_hamiltonian_path(width, height, adjacency_order=None):
 
         return False
 
-    # 4) try starting points
+    # Start DFS from corners or specified starting points
+    # If an adjacency_order is provided, start from the first point in it
+    # Otherwise, start from the four corners of the grid
     if adjacency_order:
         start_pts = [min(adjacency_order, key=adjacency_order.get)]
     else:
@@ -391,7 +449,7 @@ def embed_and_prune_sfc(sfc, width, height):
     while grid_size(order, sfc) < max(width, height):
         order += 1
 
-    # —————— generate on the padded square, then prune out‑of‑domain points
+    # Generate on the padded square, then prune out‑of‑domain points
     P = grid_size(order, sfc)
     raw = sfc(order, size=P)   # returns [(x, y), ...] in [0..P] coords
 
@@ -430,21 +488,6 @@ def sample_sfc(sfc, width, height):
     return curve
 
 
-def break_cycle_to_path(curve):
-    """
-    If the given curve is a cycle, break it at any adjacent edge
-    to form a path. Returns a reordered list of points.
-    """
-    n = len(curve)
-    for i in range(n):
-        a = curve[i]
-        b = curve[(i + 1) % n]
-        # Manhattan-adjacent
-        if abs(a[0] - b[0]) + abs(a[1] - b[1]) == 1:
-            return curve[i+1:] + curve[:i+1]
-    return curve
-
-
 if __name__ == "__main__":
     # sfc = onion_curve
     sfc = peano_curve
@@ -452,10 +495,9 @@ if __name__ == "__main__":
     # sfc = hilbert_curve
     # sfc = moore_curve
 
-    width, height = 14, 14
+    width, height = 12, 12
 
     curve = embed_and_prune_sfc(sfc, width, height)
-    # curve = break_cycle_to_path(curve)
     curve = refine_curve_to_hamiltonian(curve, width, height)
 
     print(curve)
