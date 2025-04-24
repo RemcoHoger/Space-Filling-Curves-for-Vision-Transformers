@@ -16,8 +16,7 @@ def onion_curve(order, size=1.0):
         List[Tuple[float, float]]: Ordered list of (x, y) points.
     """
     # Ensure even order (onion curves are defined for even-sized grids)
-    if order % 2 != 0:
-        order += 1
+    order *= 2
 
     def generate_coords(j, offset_x=0, offset_y=0):
         """Generate coordinates for a j×j grid with the given offset."""
@@ -151,10 +150,10 @@ def z_curve(order, size=1.0):
             points.append((x0 + w / 2, y0 + w / 2))
         else:
             half = w / 2
-            z(x0 + half, y0,       half, n - 1)  # Top-right
-            z(x0,       y0,       half, n - 1)  # Top-left
+            z(x0 + half, y0, half, n - 1)  # Top-right
+            z(x0, y0, half, n - 1)  # Top-left
             z(x0 + half, y0 + half, half, n - 1)  # Bottom-right
-            z(x0,       y0 + half, half, n - 1)  # Bottom-left
+            z(x0, y0 + half, half, n - 1)  # Bottom-left
 
     z(0, 0, size, order)
     deg = np.pi
@@ -186,14 +185,12 @@ def hilbert_curve(order, size=1.0):
             y = y0 + (xj + yj) / 2
             points.append((x, y))
         else:
-            hilbert(x0, y0,               yi/2, yj /
-                    2,               xi/2, xj/2, n-1)
-            hilbert(x0 + xi/2, y0 + xj/2, xi/2, xj /
-                    2,               yi/2, yj/2, n-1)
-            hilbert(x0 + xi/2 + yi/2, y0 + xj/2 +
-                    yj/2, xi/2, xj/2, yi/2, yj/2, n-1)
-            hilbert(x0 + xi/2 + yi, y0 + xj/2 + yj, -
-                    yi/2, -yj/2, -xi/2, -xj/2, n-1)
+            hilbert(x0, y0, yi/2, yj / 2, xi/2, xj/2, n-1)
+            hilbert(x0 + xi/2, y0 + xj/2, xi/2, xj / 2, yi/2, yj/2, n-1)
+            hilbert(x0 + xi/2 + yi/2, y0 + xj/2 + yj/2, xi/2, xj/2,
+                    yi/2, yj/2, n-1)
+            hilbert(x0 + xi/2 + yi, y0 + xj/2 + yj, - yi/2, -yj/2,
+                    -xi/2, -xj/2, n-1)
 
     hilbert(0, 0, size, 0, 0, size, order)
     deg = np.pi / 2
@@ -256,101 +253,101 @@ def moore_curve(order, size=1.0):
 
 def find_hamiltonian_path(width, height, adjacency_order=None):
     """
-    Find a Hamiltonian path on the width×height grid graph.
-    Optionally uses adjacency_order, a dict mapping node -> priority index.
-    Returns list of (x,y) or None if not found.
+    Find a Hamiltonian path on the width×height grid, allowing
+    8-way moves but giving diagonal moves lower priority.
     """
     sys.setrecursionlimit(10_000_000)
     total = width * height
 
-    # visited flags and path
+    # visited flags: 2D list for clarity (could swap in a flat bitarray if desired)
     visited = [[False] * height for _ in range(width)]
     path = []
 
-    # 1) Precompute static neighbors for every cell once
-    dirs = [(1, 0), (-1, 0), (0, 1), (0, -1)]
-    static_nbrs = {
-        (x, y): [(x + dx, y + dy)
-                 for dx, dy in dirs
-                 if 0 <= x + dx < width and 0 <= y + dy < height]
-        for x in range(width) for y in range(height)
-    }
+    # --- 1) precompute all 8 neighbors per cell ---
+    dirs_cardinal = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+    dirs_diag     = [(1, 1), (1, -1), (-1, 1), (-1, -1)]
+    static_nbrs = {}
+    for x in range(width):
+        for y in range(height):
+            nbrs = []
+            for dx, dy in (dirs_cardinal + dirs_diag):
+                nx, ny = x+dx, y+dy
+                if 0 <= nx < width and 0 <= ny < height:
+                    nbrs.append((nx, ny))
+            static_nbrs[(x, y)] = nbrs
 
     def get_neighbors(x, y):
-        # Return a fresh list each time so sorting doesn't mutate static_nbrs
         nbrs = list(static_nbrs[(x, y)])
-        if adjacency_order and (x, y) in adjacency_order:
-            nbrs.sort(key=lambda v: adjacency_order.get(v, total))
+        # key: (is_diagonal, adjacency_score)
+        def key_fn(v):
+            dx = abs(v[0] - x)
+            dy = abs(v[1] - y)
+            is_diag = 1 if dx == 1 and dy == 1 else 0
+            # within each group, respect adjacency_order if given
+            score = adjacency_order.get(v, total) if adjacency_order else 0
+            return (is_diag, score)
+        nbrs.sort(key=key_fn)
         return nbrs
 
     def flood_check(sx, sy, remaining):
-        """Quick flood-fill on unvisited cells from (sx,sy)."""
+        """Quick flood-fill on unvisited cardinal+diagonal graph."""
         stack = [(sx, sy)]
         seen = {(sx, sy)}
-        count = 0
+        cnt = 0
         while stack:
             x, y = stack.pop()
-            count += 1
-            if count >= remaining:
+            cnt += 1
+            if cnt >= remaining:
                 return True
-            for dx, dy in dirs:
-                nx, ny = x + dx, y + dy
-                if (0 <= nx < width and 0 <= ny < height
-                        and not visited[nx][ny]
-                        and (nx, ny) not in seen):
+            for nx, ny in static_nbrs[(x, y)]:
+                if not visited[nx][ny] and (nx, ny) not in seen:
                     seen.add((nx, ny))
                     stack.append((nx, ny))
-        return count >= remaining
+        return cnt >= remaining
 
     def dfs(x, y):
         if len(path) == total:
             return True
 
-        # 2) Get all unvisited neighbors of current
+        # 2) only unvisited neighbors, in our new priority order
         nbrs = [(nx, ny) for nx, ny in get_neighbors(x, y)
                 if not visited[nx][ny]]
 
-        # --- BRIDGE / forced-move logic ----------------------------------
-        forced = []
-        filtered = []
+        # 3) bridge/forced-move logic stays the same
+        forced, filtered = [], []
         for nx, ny in nbrs:
-            # count how many free exits (excluding back to (x,y))
             exits = 0
             for ux, uy in static_nbrs[(nx, ny)]:
                 if not visited[ux][uy] and (ux, uy) != (x, y):
                     exits += 1
-            # if no exits and we're not at goal, this move is a dead-end → skip
-            if exits == 0 and len(path) + 1 < total:
+            if exits == 0 and len(path)+1 < total:
                 continue
-            # a single exit means this edge is 'forced'
             if exits == 1:
                 forced.append((nx, ny))
             filtered.append((nx, ny))
-
-        # if any forced moves exist, *only* explore them
-        if forced:
-            nbrs = forced
-        else:
-            nbrs = filtered
-        # ------------------------------------------------------------------
+        nbrs = forced or filtered
 
         for nx, ny in nbrs:
             visited[nx][ny] = True
             path.append((nx, ny))
 
-            remaining = total - len(path)
-            if remaining == 0 or flood_check(nx, ny, remaining):
+            rem = total - len(path)
+            if rem == 0 or flood_check(nx, ny, rem):
                 if dfs(nx, ny):
                     return True
 
-            # backtrack
             visited[nx][ny] = False
             path.pop()
 
         return False
 
-    # Try each corner as a start
-    for sx, sy in [(0, 0), (width-1, 0), (0, height-1), (width-1, height-1)]:
+    # 4) try starting points
+    if adjacency_order:
+        start_pts = [min(adjacency_order, key=adjacency_order.get)]
+    else:
+        start_pts = [(0, 0), (width-1, 0), (0, height-1), (width-1, height-1)]
+
+    for sx, sy in start_pts:
         visited[sx][sy] = True
         path[:] = [(sx, sy)]
         if dfs(sx, sy):
@@ -372,7 +369,7 @@ def refine_curve_to_hamiltonian(curve, width, height):
     return ham
 
 
-def grid_size(order):
+def grid_size(order, sfc):
     name = sfc.__name__
     if name in ("hilbert_curve", "z_curve", "moore_curve"):
         return 2**order
@@ -391,11 +388,11 @@ def embed_and_prune_sfc(sfc, width, height):
     out-of-domain points.
     """
     order = 0
-    while grid_size(order) < max(width, height):
+    while grid_size(order, sfc) < max(width, height):
         order += 1
 
     # —————— generate on the padded square, then prune out‑of‑domain points
-    P = grid_size(order)
+    P = grid_size(order, sfc)
     raw = sfc(order, size=P)   # returns [(x, y), ...] in [0..P] coords
 
     # Convert float centers back to integer cell indices and filter
@@ -408,16 +405,57 @@ def embed_and_prune_sfc(sfc, width, height):
     return curve
 
 
+def sample_sfc(sfc, width, height):
+    """
+    Generate a thinned SFC ordering on a WxH grid by sampling
+    a 2^k x 2^k SFC curve and mapping points down to the smaller domain.
+    """
+    # pick power-of-two size P >= max(width, height)
+    k = np.ceil(np.log2(max(width, height)))
+    P = 3 ** k if sfc.__name__ == "peano_curve" else 2 ** k
+
+    # get the full P×P Hilbert curve (float centers in [0, ..., P))
+    raw = sfc(k, size=P)
+
+    # map and de-duplicate into WxH integer cells
+    seen = set()
+    curve = []
+    for x, y in raw:
+        i = int(np.floor(x * width / P))
+        j = int(np.floor(y * height / P))
+        if 0 <= i < width and 0 <= j < height and (i, j) not in seen:
+            seen.add((i, j))
+            curve.append((i, j))
+
+    return curve
+
+
+def break_cycle_to_path(curve):
+    """
+    If the given curve is a cycle, break it at any adjacent edge
+    to form a path. Returns a reordered list of points.
+    """
+    n = len(curve)
+    for i in range(n):
+        a = curve[i]
+        b = curve[(i + 1) % n]
+        # Manhattan-adjacent
+        if abs(a[0] - b[0]) + abs(a[1] - b[1]) == 1:
+            return curve[i+1:] + curve[:i+1]
+    return curve
+
+
 if __name__ == "__main__":
     # sfc = onion_curve
-    # sfc = peano_curve
+    sfc = peano_curve
     # sfc = z_curve
-    sfc = hilbert_curve
+    # sfc = hilbert_curve
     # sfc = moore_curve
 
     width, height = 14, 14
 
     curve = embed_and_prune_sfc(sfc, width, height)
+    # curve = break_cycle_to_path(curve)
     curve = refine_curve_to_hamiltonian(curve, width, height)
 
     print(curve)
