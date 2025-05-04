@@ -1,7 +1,9 @@
 import matplotlib.pyplot as plt
-from functools import cache
+from functools import cache, lru_cache
 import numpy as np
 import sys
+import math
+from typing import List, Tuple, Callable
 
 
 def onion_curve(order, size=1.0):
@@ -249,7 +251,7 @@ def moore_curve(order, size=1.0):
     return [tuple(np.dot(rotation_matrix, [x_i, y_i])) for x_i, y_i in points]
 
 
-def find_hamiltonian_path(width, height, adjacency_order=None):
+def find_hamiltonian_path(width, height, adjacency_order=None, diag=False):
     """
     Attempt to find a Hamiltonian path on a 2D grid with 8-way connectivity.
 
@@ -285,7 +287,10 @@ def find_hamiltonian_path(width, height, adjacency_order=None):
     # that is always a neighbor, regardless of the current path.
     # This is used to speed up the flood-fill check.
     dirs_cardinal = [(1, 0), (-1, 0), (0, 1), (0, -1)]
-    dirs_diag = [(1, 1), (1, -1), (-1, 1), (-1, -1)]
+    if diag:
+        dirs_diag = [(1, 1), (1, -1), (-1, 1), (-1, -1)]
+    else:
+        dirs_diag = []
     static_nbrs = {}
     for x in range(width):
         for y in range(height):
@@ -412,6 +417,10 @@ def find_hamiltonian_path(width, height, adjacency_order=None):
             return path
         visited[sx][sy] = False
 
+    # If no Hamiltonian path is found, first try with diagonal, then None
+    # if not diag:
+    #     return find_hamiltonian_path(width, height, adjacency_order, diag=True)
+
     return None
 
 
@@ -463,46 +472,130 @@ def embed_and_prune_sfc(sfc, width, height):
     return curve
 
 
-def sample_sfc(sfc, width, height):
+def get_symmetries(B: int) -> List[Callable[[float, float], Tuple[float, float]]]:
     """
-    Generate a thinned SFC ordering on a WxH grid by sampling
-    a 2^k x 2^k SFC curve and mapping points down to the smaller domain.
+    Return the 8 dihedral symmetries (rotations/reflections) for a B×B block
+    as functions mapping (x, y) -> (x', y').
     """
-    # pick power-of-two size P >= max(width, height)
-    k = np.ceil(np.log2(max(width, height)))
-    P = 3 ** k if sfc.__name__ == "peano_curve" else 2 ** k
+    def id_(x, y): return (x, y)
+    def rot90(x, y): return (y, B - x)
+    def rot180(x, y): return (B - x, B - y)
+    def rot270(x, y): return (B - y, x)
+    def refl_x(x, y): return (B - x, y)
+    def refl_x_rot90(x, y): return (y, x)               # reflect over y=x
+    # reflect over horizontal mid
+    def refl_x_rot180(x, y): return (x, B - y)
+    # reflect over anti-diagonal
+    def refl_x_rot270(x, y): return (B - y, B - x)
+    return [id_, rot90, rot180, rot270,
+            refl_x, refl_x_rot90, refl_x_rot180, refl_x_rot270]
 
-    # get the full P×P Hilbert curve (float centers in [0, ..., P))
-    raw = sfc(k, size=P)
 
-    # map and de-duplicate into WxH integer cells
-    seen = set()
-    curve = []
-    for x, y in raw:
-        i = int(np.floor(x * width / P))
-        j = int(np.floor(y * height / P))
-        if 0 <= i < width and 0 <= j < height and (i, j) not in seen:
-            seen.add((i, j))
-            curve.append((i, j))
+def block_stitch_sfc(
+    sfc: Callable[[int, int], List[Tuple[float, float]]],
+    width: int,
+    height: int
+) -> List[Tuple[int, int]]:
+    """
+    Block-stitching with two-end alignment:
+    - Precompute the sequence of power-of-two blocks (x0,y0,B,k).
+    - For each block i, pick the symmetry that minimizes:
+         dist(prev_exit, entry_i_sym) + dist(exit_i_sym, default_entry_{i+1})
+    """
+    # First, collect the block list in order
+    blocks = []
 
-    return curve
+    def collect(x0, y0, w, h):
+        if w <= 0 or h <= 0:
+            return
+        base = 3 if sfc.__name__ == "peano_curve" else 2
+        k = np.floor(np.log(min(w, h)) / np.log(base))
+        B = base ** k
+        blocks.append((x0, y0, B, k))
+        # right stripe and bottom stripe
+        collect(x0 + B, y0, w - B, B)
+        collect(x0, y0 + B, w, h - B)
+    collect(0, 0, width, height)
+
+    # Precompute default entries of next blocks (unrotated)
+    default_entries = []
+    for (_x0, _y0, _B, _k) in blocks:
+        raw = sfc(_k, _B)
+        # default entry is floor of first raw point
+        x, y = raw[0]
+        default_entries.append((math.floor(_x0 + x), math.floor(_y0 + y)))
+
+    visited = set()
+    curve: List[Tuple[int, int]] = []
+    blocked_curve: List[List[Tuple[int, int]]] = []
+
+    def manh(a, b): return abs(a[0]-b[0]) + abs(a[1]-b[1])
+
+    prev_exit = None
+    # Iterate through blocks
+    for idx, (x0, y0, B, k) in enumerate(blocks):
+        raw = sfc(k, B)
+        syms = get_symmetries(B)
+        best_score = math.inf
+        best_oriented = None
+        # target for next block entry
+        next_entry = default_entries[idx+1] if idx+1 < len(blocks) else None
+
+        # Try each symmetry
+        for sym in syms:
+            # apply to all raw points, then floor+translate
+            pts = [(x0 + math.floor(sym(x, y)[0]), y0 +
+                    math.floor(sym(x, y)[1])) for x, y in raw]
+            # filter only new points
+            new_pts = [p for p in pts if p not in visited]
+            if not new_pts:
+                continue
+            entry = new_pts[0]
+            exit_ = new_pts[-1]
+            # score = dist from prev_exit to entry + dist exit to next_entry
+            score = 0
+            if prev_exit is not None:
+                score += manh(prev_exit, entry)
+            if next_entry is not None:
+                score += manh(exit_, next_entry)
+            if score < best_score:
+                best_score = score
+                best_oriented = new_pts
+
+        # append best_oriented
+        for p in best_oriented:
+            visited.add(p)
+            curve.append(p)
+        blocked_curve.append(best_oriented)
+        prev_exit = best_oriented[-1]
+
+    return curve, blocked_curve
 
 
 if __name__ == "__main__":
     # sfc = onion_curve
-    sfc = peano_curve
+    # sfc = peano_curve
     # sfc = z_curve
-    # sfc = hilbert_curve
+    sfc = hilbert_curve
     # sfc = moore_curve
 
     width, height = 12, 12
 
-    curve = embed_and_prune_sfc(sfc, width, height)
-    curve = refine_curve_to_hamiltonian(curve, width, height)
+    curve, blocked_curve = block_stitch_sfc(sfc, width, height)
+    # curve = embed_and_prune_sfc(sfc, width, height)
 
     print(curve)
     x_vals, y_vals = zip(*curve)
     plt.plot(x_vals, y_vals, marker='o')
     plt.axis('equal')
     plt.title(f"{sfc.__name__} on {width}×{height} via embed‑&‑prune")
+    # plt.show()
+
+    # Plot the blocked curve
+    fig, ax = plt.subplots()
+    for block in blocked_curve:
+        x_vals, y_vals = zip(*block)
+        ax.plot(x_vals, y_vals, marker='o')
+    ax.set_aspect('equal')
+    ax.set_title(f"{sfc.__name__} on {width}×{height} via block-stitching")
     plt.show()

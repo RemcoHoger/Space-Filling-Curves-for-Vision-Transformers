@@ -18,33 +18,14 @@ import torch.nn as nn
 import torch.optim as optim
 import matplotlib.pyplot as plt
 
-from src.tokenizers.hilbert_embedding import HilbertEmbedding
-from src.tokenizers.zigzag_embedding import ZigzagEmbedding
-from src.tokenizers.random_embedding import RandomEmbedding
-from src.models.vit import VisionTransformer
+from src.tokenizers._2D.zigzag_embedding import ZigzagEmbedding
+from src.tokenizers._1D.zigzag_embedding1D import RasterScan1DEmbedding
+from src.tokenizers._1D.hilbert_embedding1D import HilbertEmbedding1D
+# from src.models.vit import VisionTransformer
+from src.models.vit import VisionTransformer1D, VisionTransformer
+from src.models.altvit import Hilbert1DViT, RasterScan1DViT, SimpleViT
 from src.training.scheduler import WarmupCosineScheduler
 from src.training.train import train_with_scheduler, evaluate
-
-
-def plot_all_positional_encodings(pos_embed, title="GFPE-ViT positional encodings"):
-    """
-    Plot all positional encodings (excluding CLS token).
-
-    Args:
-        pos_embed (torch.Tensor): (num_patches + 1, dim) positional encodings.
-    """
-    num_patches_plus_cls, dim = pos_embed.shape
-    num_patches = num_patches_plus_cls - 1
-
-    plt.figure(figsize=(10, 6))
-    for i in range(1, num_patches_plus_cls):  # skip CLS at index 0
-        plt.plot(pos_embed[i].cpu().numpy(), alpha=0.4, linewidth=0.8)
-    plt.title(title)
-    plt.xlabel("Embedding Dimension")
-    plt.ylabel("Encoding Value")
-    plt.grid(True)
-    plt.tight_layout()
-    plt.show()
 
 
 def main():
@@ -59,28 +40,38 @@ def main():
     torch.backends.cudnn.allow_tf32 = False
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    transform = transforms.Compose([
+    train_transform = transforms.Compose([
+        transforms.RandomHorizontalFlip(p=0.5),
+        transforms.RandomCrop(32, padding=4),
+        transforms.ColorJitter(
+            brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
         transforms.ToTensor(),
-        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+        transforms.Normalize(mean=(0.4914, 0.4822, 0.4465),
+                             std=(0.2023, 0.1994, 0.2010))
+    ])
+
+    test_transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize(mean=(0.4914, 0.4822, 0.4465),
+                             std=(0.2023, 0.1994, 0.2010))
     ])
 
     train_set = datasets.CIFAR10(
-        root='./data', train=True, download=True, transform=transform)
+        root='./data', train=True, download=True, transform=train_transform)
     test_set = datasets.CIFAR10(
-        root='./data', train=False, download=True, transform=transform)
+        root='./data', train=False, download=True, transform=test_transform)
 
     train_loader = DataLoader(train_set, batch_size=64, shuffle=True)
     test_loader = DataLoader(test_set, batch_size=64, shuffle=False)
 
-    embedding = HilbertEmbedding(
-        img_size=32, patch_size=4, in_channels=3, embed_dim=128)
+    patch_embed = ZigzagEmbedding(
+        img_size=32, patch_size=4, in_channels=3, embed_dim=64)
 
     model = VisionTransformer(
-        patch_embed=embedding,
-        embed_dim=128,
+        patch_embed=patch_embed,
         depth=6,
         n_heads=4,
-        mlp_dim=256,
+        mlp_dim=128,
         num_classes=10
     ).to(device)
 

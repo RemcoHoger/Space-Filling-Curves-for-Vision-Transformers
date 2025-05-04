@@ -1,10 +1,41 @@
 import torch
 import math
 import torch.nn as nn
+# from flash_attn.modules.mha import FlashMHA
 
 # Import the "frontend" patch tokenizer
 from src.tokenizers.base_patch_embedding import BasePatchEmbedding
-from src.tokenizers.hilbert_embedding import HilbertEmbedding
+# from src.tokenizers.hilbert_embedding import HilbertEmbedding
+
+########################################################################
+# TokenAggregator
+########################################################################
+
+
+class TokenAggregator(nn.Module):
+    """
+    Aggregates neighbouring tokens with a depth‑wise separable Conv‑1d.
+    Based on the paper which introduced the 'localformer'.
+    ----
+    dim : int           # embedding dimension
+    k   : int = 3       # kernel size (paper uses 3)
+    s   : int = 1       # stride   (paper uses 1)
+    """
+
+    def __init__(self, dim: int, k: int = 3, s: int = 1):
+        super().__init__()
+        self.dw = nn.Conv1d(dim, dim, k, s, padding=k//2, groups=dim)
+        self.pw = nn.Conv1d(dim, dim, 1, 1)     # point‑wise
+        self.act = nn.GELU()
+        self.norm = nn.LayerNorm(dim)
+
+    def forward(self, x):                       # x: [B, N, D]
+        # move channel to Conv1d’s expected position
+        x = x.transpose(1, 2)                   # [B, D, N]
+        x = self.pw(self.dw(x))                 # depthwise --> pointwise
+        x = x.transpose(1, 2)                   # [B, N, D]
+        return self.norm(self.act(x))
+
 
 ########################################################################
 # TransformerSeqEncoder
@@ -29,7 +60,7 @@ class TransformerSeqEncoder(nn.Module):
         super().__init__()
         self.max_len = max_len
         self.grid_size = int(math.sqrt(max_len))
-        assert self.grid_size ** 2 == max_len, "max_len must be a perfect square."
+        # assert self.grid_size ** 2 == max_len, "max_len must be a perfect square."
 
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=input_dim,
@@ -38,20 +69,32 @@ class TransformerSeqEncoder(nn.Module):
             dropout=dropout_p,
             batch_first=True
         )
+
         self.transformer = nn.TransformerEncoder(
             encoder_layer, num_layers=n_layers)
 
-        # initialize the learnable [CLS] token
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, input_dim))
+        self.pos_embed = nn.Parameter(torch.randn(1, max_len, input_dim))
+
+        # Implement flash attention to fully utilize the H100 architecture
+        # encoder_layer.self_attn = FlashMHA(
+        #     embed_dim=input_dim,
+        #     num_heads=n_head,
+        #     dropout=dropout_p,
+        #     causal=False,
+        #     bias=True,
+        #     device=encoder_layer.self_attn.device
+        # )
+        # # initialize the learnable [CLS] token
+        # self.cls_token = nn.Parameter(torch.zeros(1, 1, input_dim))
 
         # initialize the positional encoding
-        patch_encoding = self._sinusoidal_positional_embedding(
-            torch.arange(max_len), input_dim, method)
-        # make sure the [CLS] token is at the beginning and is initialized to 0
-        cls_row = torch.zeros(1, input_dim, device=patch_encoding.device,
-                              dtype=patch_encoding.dtype)
-        self.register_buffer("pos_embed", torch.cat(
-            [cls_row, patch_encoding], dim=0))
+        # patch_encoding = self._sinusoidal_positional_embedding(
+        #     torch.arange(max_len), input_dim, method)
+        # # make sure the [CLS] token is at the beginning and is initialized to 0
+        # cls_row = torch.zeros(1, input_dim, device=patch_encoding.device,
+        #                       dtype=patch_encoding.dtype)
+        # self.register_buffer("pos_embed", torch.cat(
+        #     [cls_row, patch_encoding], dim=0))
 
         self.to_patch_embedding = method
 
@@ -63,31 +106,31 @@ class TransformerSeqEncoder(nn.Module):
             w == pos.size(0), "pos must be a perfect square for 2D embedding"
         assert dim % 2 == 0, "feature dimension must be even for GFPE sincos embedding"
 
-        # Use encoding as introduced in the GFPE-ViT paper
-        if isinstance(method, HilbertEmbedding):
-            hilbert_indices = method.hilbert_indices
-            n = hilbert_indices.numel()
-            N = int(math.sqrt(n))
-            assert N*N == n
-            assert dim % 2 == 0
+        # # Use encoding as introduced in the GFPE-ViT paper
+        # if isinstance(method, HilbertEmbedding):
+        #     hilbert_indices = method.hilbert_indices
+        #     n = hilbert_indices.numel()
+        #     N = int(math.sqrt(n))
+        #     assert N*N == n
+        #     assert dim % 2 == 0
 
-            pos = hilbert_indices.to(torch.float32).unsqueeze(1)  # (n,1)
-            i_ar = torch.arange(
-                dim//2, dtype=torch.float32).unsqueeze(0)  # (1, d/2)
-            two_pi = 2 * math.pi
+        #     pos = hilbert_indices.to(torch.float32).unsqueeze(1)  # (n,1)
+        #     i_ar = torch.arange(
+        #         dim//2, dtype=torch.float32).unsqueeze(0)  # (1, d/2)
+        #     two_pi = 2 * math.pi
 
-            # scale  = (2*i * N^2 * pos * 2pi) / (T * n * d)
-            scale = (2.0 * i_ar * N ** 2 * pos * two_pi) / (T * n * dim)
+        #     # scale  = (2*i * N^2 * pos * 2pi) / (T * n * d)
+        #     scale = (2.0 * i_ar * N ** 2 * pos * two_pi) / (T * n * dim)
 
-            # phase = h * (2*i * pos * 2pi) / d
-            phase = h_param * (2.0 * i_ar * pos * two_pi) / dim
+        #     # phase = h * (2*i * pos * 2pi) / d
+        #     phase = h_param * (2.0 * i_ar * pos * two_pi) / dim
 
-            arg = scale + phase  # (n, d/2)
-            pe_sin = torch.sin(arg)
-            pe_cos = torch.cos(arg)
-            pe = torch.cat([pe_sin, pe_cos], dim=1)  # (n, d)
+        #     arg = scale + phase  # (n, d/2)
+        #     pe_sin = torch.sin(arg)
+        #     pe_cos = torch.cos(arg)
+        #     pe = torch.cat([pe_sin, pe_cos], dim=1)  # (n, d)
 
-            return pe.type(dtype)
+        #     return pe.type(dtype)
 
         # Default: classic sincos
         y, x = torch.meshgrid(torch.arange(h), torch.arange(w), indexing="ij")
@@ -115,12 +158,12 @@ class TransformerSeqEncoder(nn.Module):
             torch.Tensor: Encoded [CLS] token of shape [B, D].
         """
         B = x.size(0)
-        cls_tokens = self.cls_token.expand(B, -1, -1)  # [B, 1, D]
-        x = torch.cat((cls_tokens, x), dim=1)          # [B, N+1, D]
+        # cls_tokens = self.cls_token.expand(B, -1, -1)  # [B, 1, D]
+        # x = torch.cat((cls_tokens, x), dim=1)          # [B, N+1, D]
         # add positional embeddings
         x = x + self.pos_embed[:x.size(1), :]  # [B, N, D]
         x = self.transformer(x)  # transformer encoding
-        return x[:, 0]  # return [CLS] token
+        return x.flatten(1, 2)  # [B, N*D]
 
 
 ########################################################################
@@ -137,17 +180,23 @@ class MultiLayerPredictor(nn.Sequential):
         num_classes (int): Number of output classes.
     """
 
-    def __init__(self, hidden_dim, n_layers=3, dropout_p=0.1, num_classes=10):
+    def __init__(self, embed_dim, n_layers=2, dropout_p=0.5, num_classes=10):
         super().__init__()
+        self.append(nn.LayerNorm(embed_dim))
+        self.append(nn.Flatten())
+        self.append(nn.Dropout(dropout_p))
+        prev_dim = embed_dim
         for _ in range(n_layers - 1):
-            self.append(nn.Linear(hidden_dim, hidden_dim))
+            next_dim = prev_dim // 2
+            self.append(nn.Linear(prev_dim, next_dim))
             self.append(nn.GELU())
             self.append(nn.Dropout(dropout_p))
-        self.append(nn.Linear(hidden_dim, num_classes))
+            prev_dim = next_dim
+        self.append(nn.Linear(prev_dim, num_classes))
 
 
 ########################################################################
-# VisionTransformer
+# Regular VisionTransformer
 ########################################################################
 class VisionTransformer(nn.Module):
     """
@@ -175,7 +224,7 @@ class VisionTransformer(nn.Module):
     ):
         super().__init__()
         self.patch_embed = patch_embed
-        embed_dim = patch_embed.proj.out_channels
+        embed_dim = patch_embed.embed_dim
         self.encoder = TransformerSeqEncoder(
             input_dim=embed_dim,
             max_len=self.patch_embed.n_patches,
@@ -184,8 +233,9 @@ class VisionTransformer(nn.Module):
             hidden_dim=mlp_dim,
             n_layers=depth
         )
+        # self.ta = TokenAggregator(embed_dim)
         self.mlp_head = MultiLayerPredictor(
-            embed_dim, n_layers=2, num_classes=num_classes)
+            embed_dim * self.patch_embed.n_patches, n_layers=2, num_classes=num_classes)
 
     def forward(self, x):
         """
@@ -202,6 +252,70 @@ class VisionTransformer(nn.Module):
             torch.Tensor: Output logits of shape [B, num_classes].
         """
         x = self.patch_embed(x)  # Convert image to patch embeddings
+        # x = self.ta(x)           # Aggregate tokens
         x = self.encoder(x)      # Encode patches using Transformer
         x = self.mlp_head(x)  # Classify using linear head
         return x
+
+########################################################################
+# 1D VisionTransformer
+########################################################################
+
+
+class VisionTransformer1D(nn.Module):
+    """
+    Vision Transformer (ViT) model for 1D data classification.
+
+    Args:
+        img_size (int): Size of the input image (assumes square images).
+        patch_size (int): Size of each patch (assumes square patches).
+        in_channels (int): Number of input channels (e.g., 3 for RGB images).
+        embed_dim (int): Dimensionality of the patch embeddings.
+        depth (int): Number of Transformer encoder layers.
+        n_heads (int): Number of attention heads.
+        mlp_dim (int): Dimensionality of the feedforward network.
+        num_classes (int): Number of output classes.
+    """
+
+    def __init__(
+        self,
+        patch_embed: BasePatchEmbedding,
+        embed_dim=128,
+        depth=6,
+        n_heads=4,
+        mlp_dim=256,
+        num_classes=10
+    ):
+        super().__init__()
+        self.patch_embed = patch_embed
+
+        embed_dim = patch_embed.embed_dim
+        self.encoder = TransformerSeqEncoder(
+            input_dim=embed_dim,
+            max_len=self.patch_embed.n_patches,
+            n_head=n_heads,
+            hidden_dim=mlp_dim,
+            n_layers=depth,
+            method=self.patch_embed
+        )
+
+        self.mlp_head = MultiLayerPredictor(
+            embed_dim * self.patch_embed.n_patches,
+            n_layers=2,
+            dropout_p=0.5,
+            num_classes=num_classes
+        )
+
+    def forward(self, x):
+        """
+        Forward pass of the RasterScan1DViT.
+
+        Args:
+            x (torch.Tensor): Input tensor of shape [B, C, H, W].
+
+        Returns:
+            torch.Tensor: Output logits of shape [B, num_classes].
+        """
+        x = self.patch_embed(x)  # [B, N, D]
+        x = self.encoder(x)      # [B, N*D]
+        return self.mlp_head(x)  # [B, num_classes]

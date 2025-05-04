@@ -1,5 +1,5 @@
 import torch.nn as nn
-from .base_patch_embedding import BasePatchEmbedding
+from ..base_patch_embedding import BasePatchEmbedding
 
 
 class ZigzagEmbedding(BasePatchEmbedding):
@@ -17,6 +17,7 @@ class ZigzagEmbedding(BasePatchEmbedding):
             kernel_size=patch_size,
             stride=patch_size
         )
+        self.embed_dim = embed_dim
         self.n_patches = (img_size // patch_size) ** 2
 
     def forward(self, x):
