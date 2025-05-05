@@ -54,8 +54,9 @@ def evaluate(model, test_loader, criterion, device):
     with torch.no_grad():
         for images, labels in progress_bar:
             images, labels = images.to(device), labels.to(device)
-            outputs = model(images)
-            loss = criterion(outputs, labels)
+            with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
+                outputs = model(images)
+                loss = criterion(outputs, labels)
 
             total_loss += loss.item() * images.size(0)
             correct += (outputs.argmax(dim=1) == labels).sum().item()
@@ -76,8 +77,10 @@ def train_with_scheduler(model, train_loader, criterion,
     for images, labels in progress_bar:
         images, labels = images.to(device), labels.to(device)
         optimizer.zero_grad()
-        outputs = model(images)
-        loss = criterion(outputs, labels)
+        with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+
         loss.backward()
         optimizer.step()
 
@@ -96,9 +99,6 @@ def train_with_scheduler(model, train_loader, criterion,
 
 def train_with_mixup(model, train_loader, criterion,
                      optimizer, scheduler, device, mixup_alpha=0.2):
-    """
-    Train the model for one epoch with MixUp and scheduler.
-    """
     model.train()
     total_loss = 0.0
     total_correct = 0.0
@@ -109,26 +109,21 @@ def train_with_mixup(model, train_loader, criterion,
         images = images.to(device)
         labels = labels.to(device)
 
-        # 1) MixUp the inputs & get paired labels
         images, y_a, y_b, lam = mixup_data(images, labels, alpha=mixup_alpha)
-
         optimizer.zero_grad()
-        outputs = model(images)  # (B, num_classes)
 
-        # 2) Build soft targets of shape (B, num_classes)
-        num_classes = outputs.size(1)
-        y_a_1hot = F.one_hot(y_a, num_classes).float()
-        y_b_1hot = F.one_hot(y_b, num_classes).float()
-        soft_targets = lam * y_a_1hot + (1 - lam) * y_b_1hot  # (B, C)
+        with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
+            outputs = model(images)
+            num_classes = outputs.size(1)
+            y_a_1hot = F.one_hot(y_a, num_classes).float()
+            y_b_1hot = F.one_hot(y_b, num_classes).float()
+            soft_targets = lam * y_a_1hot + (1 - lam) * y_b_1hot
+            loss = criterion(outputs, soft_targets)
 
-        # 3) Single SoftTargetCrossEntropy call
-        loss = criterion(outputs, soft_targets)
         loss.backward()
         optimizer.step()
         scheduler.step()
-        lr = optimizer.param_groups[0]['lr']
 
-        # 4) For “accuracy” we still compare hard preds to nearest integer
         preds = outputs.argmax(dim=1)
         total_correct += (lam * (preds == y_a).float() +
                           (1 - lam) * (preds == y_b).float()).sum().item()
