@@ -1,8 +1,8 @@
-import math
 import torch
 import torch.nn as nn
 from functools import cache
 from einops import rearrange
+from src.curves.space_filling_curves import embed_and_prune_sfc, hilbert_curve
 from ..base_patch_embedding import BasePatchEmbedding
 
 
@@ -23,24 +23,8 @@ class HilbertEmbedding1D(BasePatchEmbedding):
 
     @cache
     def _hilbert_order(self, n):
-        coords = []
-
-        def hilbert(x0, y0, xi, xj, yi, yj, n):
-            if n <= 0:
-                x = x0 + (xi + yi) // 2
-                y = y0 + (xj + yj) // 2
-                coords.append((x, y))
-            else:
-                hilbert(x0, y0, yi//2, yj//2, xi//2, xj//2, n-1)
-                hilbert(x0 + xi//2, y0 + xj//2, xi //
-                        2, xj//2, yi//2, yj//2, n-1)
-                hilbert(x0 + xi//2 + yi//2, y0 + xj//2 + yj//2,
-                        xi//2, xj//2, yi//2, yj//2, n-1)
-                hilbert(x0 + xi//2 + yi, y0 + xj//2 + yj,
-                        -yi//2, -yj//2, -xi//2, -xj//2, n-1)
-
-        hilbert(0, 0, n, 0, 0, n, int(math.log2(n)))
-        return torch.tensor(coords, dtype=torch.long)
+        curve = embed_and_prune_sfc(hilbert_curve, n, n)
+        return torch.tensor(curve, dtype=torch.long)
 
     def forward(self, x):
         """

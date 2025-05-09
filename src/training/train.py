@@ -72,6 +72,7 @@ def train_with_scheduler(model, train_loader, criterion,
     Train the model for one epoch with scheduler and progress tracking.
     """
     model.train()
+    scaler = torch.amp.grad_scaler()
     total_loss, correct = 0, 0
     progress_bar = tqdm(train_loader, desc="Training", leave=False)
     for images, labels in progress_bar:
@@ -81,8 +82,9 @@ def train_with_scheduler(model, train_loader, criterion,
             outputs = model(images)
             loss = criterion(outputs, labels)
 
-        loss.backward()
-        optimizer.step()
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
 
         # Update learning rate
         current_lr = scheduler.step()
