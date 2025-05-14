@@ -2,7 +2,7 @@ import torch
 import math
 import torch.nn as nn
 from einops import rearrange
-from flash_attn import flash_attn_func
+# from flash_attn import flash_attn_func
 # from flash_attn.modules.mha import FlashMHA
 
 # Import the "frontend" patch tokenizer
@@ -58,63 +58,6 @@ class FeedForward(nn.Module):
         return self.net(x)
 
 
-class FlashAttention(nn.Module):
-    def __init__(self, dim, heads=8, dim_head=64, flash=True):
-        super().__init__()
-        self.heads = heads
-        self.dim_head = dim_head
-        self.flash = flash
-        inner_dim = dim_head * heads
-
-        self.norm = nn.LayerNorm(dim)
-        self.to_qkv = nn.Linear(dim, inner_dim * 3, bias=False)
-        self.to_out = nn.Linear(inner_dim, dim, bias=False)
-
-    def forward(self, x):
-        x = self.norm(x)
-        b, n, _ = x.shape
-
-        with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16):
-            qkv = self.to_qkv(x)
-            qkv = rearrange(
-                qkv, 'b n (three h d) -> b n three h d', three=3, h=self.heads)
-            q, k, v = qkv.unbind(dim=2)
-
-            if self.flash and x.is_cuda:
-                out = flash_attn_func(q, k, v, dropout_p=0.0, causal=False)
-                out = rearrange(out, 'b n h d -> b n (h d)')
-            else:
-                # Fallback to standard attention
-                scale = self.dim_head ** -0.5
-                q, k, v = map(lambda t: rearrange(
-                    t, 'b n h d -> b h n d'), (q, k, v))
-                dots = torch.matmul(q, k.transpose(-1, -2)) * scale
-                attn = dots.softmax(dim=-1)
-                out = torch.matmul(attn, v)
-                out = rearrange(out, 'b h n d -> b n (h d)')
-
-        return self.to_out(out)
-
-
-class Transformer(nn.Module):
-    def __init__(self, dim, depth, heads, dim_head, mlp_dim):
-        super().__init__()
-        self.norm = nn.LayerNorm(dim)
-        self.layers = nn.ModuleList([])
-        for _ in range(depth):
-            self.layers.append(nn.ModuleList([
-                # Attention(dim, heads=heads, dim_head=dim_head),
-                FlashAttention(dim, heads=heads, dim_head=dim_head),
-                FeedForward(dim, mlp_dim)
-            ]))
-
-    def forward(self, x):
-        for attn, ff in self.layers:
-            x = attn(x) + x
-            x = ff(x) + x
-        return self.norm(x)
-
-
 class TransformerSeqEncoder(nn.Module):
     """
     Transformer-based sequence encoder for processing patch embeddings.
@@ -135,15 +78,16 @@ class TransformerSeqEncoder(nn.Module):
         self.grid_size = int(math.sqrt(max_len))
         # assert self.grid_size ** 2 == max_len, "max_len must be a perfect square."
 
-        # Use transformer with flash attention to utilize the H100 architecture
-        self.transformer = Transformer(
-            dim=input_dim,
-            depth=n_layers,
-            heads=n_head,
-            dim_head=input_dim // n_head,
-            mlp_dim=hidden_dim
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=input_dim,
+            nhead=n_head,
+            dim_feedforward=hidden_dim,
+            dropout=dropout_p,
+            batch_first=True
         )
 
+        self.transformer = nn.TransformerEncoder(
+            encoder_layer, num_layers=n_layers)
         # self.pos_embed = nn.Parameter(torch.randn(1, max_len, input_dim))
 
 

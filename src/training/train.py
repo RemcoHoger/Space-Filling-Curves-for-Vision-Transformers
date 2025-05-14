@@ -6,12 +6,45 @@ import numpy as np
 
 def mixup_data(x, y, alpha=0.2):
     if alpha > 0:
-        lam = np.random.beta(alpha, alpha)
+        lam = torch.distributions.Beta(alpha, alpha).sample().item()
     else:
         lam = 1.0
     batch_size = x.size(0)
     idx = torch.randperm(batch_size, device=x.device)
     return lam * x + (1 - lam) * x[idx], y, y[idx], lam
+
+
+def rand_bbox(H, W, lam):
+    cut_rat = np.sqrt(1. - lam)
+    cut_w = int(W * cut_rat)
+    cut_h = int(H * cut_rat)
+
+    cx = np.random.randint(W)
+    cy = np.random.randint(H)
+
+    bbx1 = np.clip(cx - cut_w // 2, 0, W)
+    bby1 = np.clip(cy - cut_h // 2, 0, H)
+    bbx2 = np.clip(cx + cut_w // 2, 0, W)
+    bby2 = np.clip(cy + cut_h // 2, 0, H)
+
+    return bbx1, bby1, bbx2, bby2
+
+
+def cutmix_data(x, y, alpha=0.2):
+    if alpha > 0:
+        lam = torch.distributions.Beta(alpha, alpha).sample().item()
+    else:
+        lam = 1.0
+    batch_size, _, H, W = x.size()
+    idx = torch.randperm(batch_size, device=x.device)
+
+    bbx1, bby1, bbx2, bby2 = rand_bbox(H, W, lam)
+    x[:, :, bbx1:bbx2, bby1:bby2] = x[idx, :, bbx1:bbx2, bby1:bby2]
+
+    y_a, y_b = y, y[idx]
+    # Adjust lambda based on actual area used
+    lam = 1 - ((bbx2 - bbx1) * (bby2 - bby1) / (H * W))
+    return x, y_a, y_b, lam
 
 
 def mixup_criterion(criterion, pred, y_a, y_b, lam):
@@ -72,7 +105,6 @@ def train_with_scheduler(model, train_loader, criterion,
     Train the model for one epoch with scheduler and progress tracking.
     """
     model.train()
-    scaler = torch.amp.grad_scaler()
     total_loss, correct = 0, 0
     progress_bar = tqdm(train_loader, desc="Training", leave=False)
     for images, labels in progress_bar:
@@ -82,9 +114,8 @@ def train_with_scheduler(model, train_loader, criterion,
             outputs = model(images)
             loss = criterion(outputs, labels)
 
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
+        loss.backward()
+        optimizer.step()
 
         # Update learning rate
         current_lr = scheduler.step()
@@ -99,8 +130,10 @@ def train_with_scheduler(model, train_loader, criterion,
     return avg_loss, accuracy
 
 
-def train_with_mixup(model, train_loader, criterion,
-                     optimizer, scheduler, device, mixup_alpha=0.2):
+def train_with_mixup_or_cutmix(model, train_loader, criterion,
+                               optimizer, scheduler, device,
+                               mixup_alpha=0.2, cutmix_alpha=1.0,
+                               mix_prob=0.5):
     model.train()
     total_loss = 0.0
     total_correct = 0.0
@@ -111,7 +144,12 @@ def train_with_mixup(model, train_loader, criterion,
         images = images.to(device)
         labels = labels.to(device)
 
-        images, y_a, y_b, lam = mixup_data(images, labels, alpha=mixup_alpha)
+        # Randomly choose between Mixup and CutMix
+        if np.random.rand() < mix_prob:
+            images, y_a, y_b, lam = mixup_data(images, labels, alpha=mixup_alpha)
+        else:
+            images, y_a, y_b, lam = cutmix_data(images, labels, alpha=cutmix_alpha)
+
         optimizer.zero_grad()
 
         with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
