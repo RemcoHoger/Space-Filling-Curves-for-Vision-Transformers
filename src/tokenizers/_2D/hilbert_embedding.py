@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 from functools import cache
 from einops import rearrange
-from .base_patch_embedding import BasePatchEmbedding
+from ..base_patch_embedding import BasePatchEmbedding
 
 
 class HilbertEmbedding(BasePatchEmbedding):

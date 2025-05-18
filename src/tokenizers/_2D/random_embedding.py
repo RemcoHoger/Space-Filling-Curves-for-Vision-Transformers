@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from .base_patch_embedding import BasePatchEmbedding
+from ..base_patch_embedding import BasePatchEmbedding
 
 
 class RandomEmbedding(BasePatchEmbedding):

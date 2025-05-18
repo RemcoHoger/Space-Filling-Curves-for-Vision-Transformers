@@ -44,20 +44,6 @@ class TokenAggregator(nn.Module):
 ########################################################################
 
 
-class FeedForward(nn.Module):
-    def __init__(self, dim, hidden_dim):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.LayerNorm(dim),
-            nn.Linear(dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, dim),
-        )
-
-    def forward(self, x):
-        return self.net(x)
-
-
 class TransformerSeqEncoder(nn.Module):
     """
     Transformer-based sequence encoder for processing patch embeddings.

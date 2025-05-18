@@ -6,7 +6,7 @@ import numpy as np
 
 def mixup_data(x, y, alpha=0.2):
     if alpha > 0:
-        lam = torch.distributions.Beta(alpha, alpha).sample().item()
+        lam = np.random.beta(alpha, alpha)
     else:
         lam = 1.0
     batch_size = x.size(0)
@@ -32,7 +32,7 @@ def rand_bbox(H, W, lam):
 
 def cutmix_data(x, y, alpha=0.2):
     if alpha > 0:
-        lam = torch.distributions.Beta(alpha, alpha).sample().item()
+        lam = np.random.beta(alpha, alpha)
     else:
         lam = 1.0
     batch_size, _, H, W = x.size()
@@ -161,6 +161,8 @@ def train_with_mixup_or_cutmix(model, train_loader, criterion,
             loss = criterion(outputs, soft_targets)
 
         loss.backward()
+        # Gradient clipping
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0, foreach=False)
         optimizer.step()
         scheduler.step()
 
