@@ -8,13 +8,13 @@
 #SBATCH --mem=64G
 #SBATCH --time=30:00:00
 
-# Load matching modules
+# Load the modules
 module load 2024
 module load Python/3.12.3-GCCcore-13.3.0
 module load 2023 CUDA/12.4.0
 
-# Activate your virtual environment
+# Activate the virtual environment
 source venv/bin/activate
 
-# Run your script
+# Run the script
 python main.py

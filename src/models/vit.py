@@ -74,8 +74,7 @@ class TransformerSeqEncoder(nn.Module):
 
         self.transformer = nn.TransformerEncoder(
             encoder_layer, num_layers=n_layers)
-        # self.pos_embed = nn.Parameter(torch.randn(1, max_len, input_dim))
-
+        self.pos_embed = nn.Parameter(torch.randn(1, max_len, input_dim))
 
         # # initialize the learnable [CLS] token
         # self.cls_token = nn.Parameter(torch.zeros(1, 1, input_dim))
@@ -226,6 +225,8 @@ class VisionTransformer(nn.Module):
             hidden_dim=mlp_dim,
             n_layers=depth
         )
+        self.pos_embed = nn.Parameter(
+            torch.randn(1, self.patch_embed.n_patches, embed_dim))
         # self.ta = TokenAggregator(embed_dim)
         self.mlp_head = MultiLayerPredictor(
             embed_dim * self.patch_embed.n_patches, n_layers=2, num_classes=num_classes)
@@ -246,6 +247,7 @@ class VisionTransformer(nn.Module):
         """
         x = self.patch_embed(x)  # Convert image to patch embeddings
         # x = self.ta(x)           # Aggregate tokens
+        x = x + self.pos_embed[:x.size(1), :]  # Add positional embeddings
         x = self.encoder(x)      # Encode patches using Transformer
         x = self.mlp_head(x)  # Classify using linear head
         return x
