@@ -74,7 +74,7 @@ class TransformerSeqEncoder(nn.Module):
 
         self.transformer = nn.TransformerEncoder(
             encoder_layer, num_layers=n_layers)
-        self.pos_embed = nn.Parameter(torch.randn(1, max_len, input_dim))
+        # self.pos_embed = nn.Parameter(torch.randn(1, max_len, input_dim))
 
         # # initialize the learnable [CLS] token
         # self.cls_token = nn.Parameter(torch.zeros(1, 1, input_dim))
@@ -89,52 +89,6 @@ class TransformerSeqEncoder(nn.Module):
         #     [cls_row, patch_encoding], dim=0))
 
         self.to_patch_embedding = method
-
-    def _sinusoidal_positional_embedding(self, pos, dim, method,
-                                         temperature=10000, dtype=torch.float32,
-                                         T=4, h_param=3.0):
-        h = w = int(math.sqrt(pos.size(0)))
-        assert h * \
-            w == pos.size(0), "pos must be a perfect square for 2D embedding"
-        assert dim % 2 == 0, "feature dimension must be even for GFPE sincos embedding"
-
-        # # Use encoding as introduced in the GFPE-ViT paper
-        # if isinstance(method, HilbertEmbedding):
-        #     hilbert_indices = method.hilbert_indices
-        #     n = hilbert_indices.numel()
-        #     N = int(math.sqrt(n))
-        #     assert N*N == n
-        #     assert dim % 2 == 0
-
-        #     pos = hilbert_indices.to(torch.float32).unsqueeze(1)  # (n,1)
-        #     i_ar = torch.arange(
-        #         dim//2, dtype=torch.float32).unsqueeze(0)  # (1, d/2)
-        #     two_pi = 2 * math.pi
-
-        #     # scale  = (2*i * N^2 * pos * 2pi) / (T * n * d)
-        #     scale = (2.0 * i_ar * N ** 2 * pos * two_pi) / (T * n * dim)
-
-        #     # phase = h * (2*i * pos * 2pi) / d
-        #     phase = h_param * (2.0 * i_ar * pos * two_pi) / dim
-
-        #     arg = scale + phase  # (n, d/2)
-        #     pe_sin = torch.sin(arg)
-        #     pe_cos = torch.cos(arg)
-        #     pe = torch.cat([pe_sin, pe_cos], dim=1)  # (n, d)
-
-        #     return pe.type(dtype)
-
-        # Default: classic sincos
-        y, x = torch.meshgrid(torch.arange(h), torch.arange(w), indexing="ij")
-        y = y.flatten()[:, None]
-        x = x.flatten()[:, None]
-        omega = torch.arange(dim // 4) / (dim // 4 - 1)
-        omega = 1.0 / (temperature ** omega)
-        y = y * omega
-        x = x * omega
-        pe = torch.cat((x.sin(), x.cos(), y.sin(), y.cos()), dim=1)
-
-        return pe.type(dtype)
 
     def forward(self, x):
         """
@@ -155,35 +109,52 @@ class TransformerSeqEncoder(nn.Module):
         # add positional embeddings
         # x = x + self.pos_embed[:x.size(1), :]  # [B, N, D]
         x = self.transformer(x)  # transformer encoding
-        return x.flatten(1, 2)  # [B, N*D]
+        return x
 
 
 ########################################################################
 # MultiLayerPredictor
 ########################################################################
+
+class FactorisedLinear(nn.Module):
+    """
+    Factorised linear: (N·D) -> out_dim
+      W ≈ (W_seq ⊗ W_emb) so   y = W_seq · (X · W_embᵀ)
+    """
+
+    def __init__(self, seq_len, embed_dim, rank, out_dim):
+        super().__init__()
+        self.W_emb = nn.Parameter(torch.empty(rank, embed_dim))
+        self.W_seq = nn.Parameter(torch.empty(out_dim, seq_len, rank))
+        nn.init.xavier_normal_(self.W_emb)
+        nn.init.xavier_normal_(self.W_seq)
+
+    def forward(self, x):                 # x: [B, N, D]
+        h = torch.einsum('bnd, rd -> bnr', x, self.W_emb)    # mix embedding
+        y = torch.einsum('bnr, onr -> bo',  h, self.W_seq)   # mix tokens
+        return y
+
+
 class MultiLayerPredictor(nn.Sequential):
-    """
-    Multi-layer perceptron (MLP) for classification.
-
-    Args:
-        hidden_dim (int): Dimensionality of the hidden layers.
-        n_layers (int): Number of layers in the MLP.
-        dropout_p (float): Dropout probability.
-        num_classes (int): Number of output classes.
-    """
-
-    def __init__(self, embed_dim, n_layers=2, dropout_p=0.5, num_classes=10):
+    def __init__(self, embed_dim, seq_len,
+                 n_layers=2, rank=64, dropout_p=0.5, num_classes=10):
         super().__init__()
         self.append(nn.LayerNorm(embed_dim))
-        self.append(nn.Flatten())
+
+        # factorised first layer
+        fact_out = (seq_len * embed_dim) // 2
+        self.append(FactorisedLinear(seq_len, embed_dim, rank, fact_out))
+        self.append(nn.GELU())
         self.append(nn.Dropout(dropout_p))
-        prev_dim = embed_dim
-        for _ in range(n_layers - 1):
+        prev_dim = fact_out
+
+        for _ in range(n_layers - 2):
             next_dim = prev_dim // 2
             self.append(nn.Linear(prev_dim, next_dim))
             self.append(nn.GELU())
             self.append(nn.Dropout(dropout_p))
             prev_dim = next_dim
+
         self.append(nn.Linear(prev_dim, num_classes))
 
 
@@ -229,7 +200,7 @@ class VisionTransformer(nn.Module):
             torch.randn(1, self.patch_embed.n_patches, embed_dim))
         # self.ta = TokenAggregator(embed_dim)
         self.mlp_head = MultiLayerPredictor(
-            embed_dim * self.patch_embed.n_patches, n_layers=2, num_classes=num_classes)
+            embed_dim, self.patch_embed.n_patches, n_layers=2, num_classes=num_classes)
 
     def forward(self, x):
         """
@@ -295,7 +266,8 @@ class VisionTransformer1D(nn.Module):
         )
 
         self.mlp_head = MultiLayerPredictor(
-            embed_dim * self.patch_embed.n_patches,
+            embed_dim,
+            self.patch_embed.n_patches,
             n_layers=2,
             dropout_p=0.5,
             num_classes=num_classes
