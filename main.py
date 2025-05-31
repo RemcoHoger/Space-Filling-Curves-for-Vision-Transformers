@@ -29,9 +29,11 @@ from src.tokenizers._1D.peano_embedding1D import PeanoEmbedding1D
 from src.tokenizers._1D.moore_embedding1D import MooreEmbedding1D
 from src.tokenizers._1D.onion_embedding1D import OnionEmbedding1D
 from src.tokenizers._1D.morton_embedding1D import MortonEmbedding1D
+
+from src.tokenizers.multiscale.multi_morton import HierarchicalMortonEmbedding
 # from src.models.vit import VisionTransformer
 from transformers import get_cosine_schedule_with_warmup
-from src.models.vit import VisionTransformer1D, VisionTransformer
+from src.models.vit import VisionTransformer1D, VisionTransformer, HierarchicalVisionTransformer1D
 from src.training.train import evaluate, train_with_mixup_or_cutmix
 
 
@@ -160,9 +162,10 @@ def main():
     # transforms.Normalize(mean=(0.4914, 0.4822, 0.4465),
     #                     std=(0.2023, 0.1994, 0.2010))
     train_transform = transforms.Compose([
-        transforms.RandomResizedCrop(64),
+        transforms.RandomResizedCrop(32),
         transforms.RandomHorizontalFlip(),
-        transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.1),
+        transforms.ColorJitter(
+            brightness=0.4, contrast=0.4, saturation=0.4, hue=0.1),
         transforms.ToImage(),
         transforms.ToDtype(torch.float32, scale=True),
         transforms.RandomErasing(p=0.2),
@@ -171,8 +174,8 @@ def main():
     ])
 
     test_transform = transforms.Compose([
-        transforms.Resize(64),
-        # transforms.CenterCrop(128),
+        transforms.Resize(32),
+        # transforms.CenterCrop(224),
         transforms.ToImage(),
         transforms.ToDtype(torch.float32, scale=True),
         transforms.Normalize(mean=(0.4914, 0.4822, 0.4465),
@@ -190,76 +193,76 @@ def main():
     # train_set = filter_by_class(train_set, first_100_classes)
     # test_set = filter_by_class(test_set, first_100_classes)
 
-    # train_set = torchvision.datasets.Imagenette(
-    #     root='/projects/0/prjs1528/',
-    #     split='train',
-    #     download=True,
-    #     transform=train_transform
-    # )
-
-    # test_set = torchvision.datasets.Imagenette(
-    #     root='/projects/0/prjs1528/',
-    #     split='val',
-    #     download=True,
-    #     transform=test_transform
-    # )
-
-    train_set = TinyImageNetDataset(
-        root='/projects/0/prjs1528/tiny-imagenet-200',
-        split='train',
+    train_set = torchvision.datasets.CIFAR10(
+        root='/projects/0/prjs1528/',
+        train=True,
+        download=True,
         transform=train_transform
     )
 
-    test_set = TinyImageNetDataset(
-        root='/projects/0/prjs1528/tiny-imagenet-200',
-        split='val',
+    test_set = torchvision.datasets.CIFAR10(
+        root='/projects/0/prjs1528/',
+        train=False,
+        download=True,
         transform=test_transform
     )
 
+    # train_set = TinyImageNetDataset(
+    #     root='/projects/0/prjs1528/tiny-imagenet-200',
+    #     split='train',
+    #     transform=train_transform
+    # )
+
+    # test_set = TinyImageNetDataset(
+    #     root='/projects/0/prjs1528/tiny-imagenet-200',
+    #     split='val',
+    #     transform=test_transform
+    # )
+
     train_loader = DataLoader(
-        train_set, batch_size=256, shuffle=True, num_workers=16, pin_memory=True, persistent_workers=True)
-    test_loader = DataLoader(test_set, batch_size=256,
+        train_set, batch_size=512, shuffle=True, num_workers=16, pin_memory=True, persistent_workers=True)
+    test_loader = DataLoader(test_set, batch_size=512,
                              shuffle=False, num_workers=16, pin_memory=True, persistent_workers=True)
 
     patch_embed_dict = {
-        "raster": RasterScan1DEmbedding,
-        "hilbert": HilbertEmbedding1D,
-        "peano": PeanoEmbedding1D,
-        "moore": MooreEmbedding1D,
-        "onion": OnionEmbedding1D,
+        # "raster": RasterScan1DEmbedding,
+        # "hilbert": HilbertEmbedding1D,
+        # "peano": PeanoEmbedding1D,
+        # "moore": MooreEmbedding1D,
+        # "onion": OnionEmbedding1D,
         "morton": MortonEmbedding1D,
-        "zigzag": ZigzagEmbedding
+        # "zigzag": ZigzagEmbedding
     }
 
     for patch_embed_name, patch_embed_class in patch_embed_dict.items():
         print(f"Using {patch_embed_name} embedding")
         if patch_embed_name == "zigzag":
             patch_embed = patch_embed_class(
-                img_size=64,
+                img_size=32,
                 patch_size=4,
                 in_channels=3,
-                embed_dim=384
+                embed_dim=256
             )
             model = VisionTransformer(
                 patch_embed=patch_embed,
-                depth=12,
-                n_heads=6,
-                mlp_dim=1536,
-                num_classes=200
+                depth=8,
+                n_heads=4,
+                mlp_dim=512,
+                num_classes=10
             ).to(device)
         else:
-            patch_embed = patch_embed_class(
-                img_size=64,
-                patch_size=4 ** 2,
+            patch_embed = HierarchicalMortonEmbedding(
+                img_size=32,
                 in_channels=3,
-                embed_dim=384,
+                patch_size_list=[16, 16, 16],
+                embed_dim_list=[256, 256, 256]
             )
-            model = VisionTransformer1D(
+            model = HierarchicalVisionTransformer1D(
                 patch_embed=patch_embed,
-                depth=12,
-                n_heads=6,
-                mlp_dim=1536,
-                num_classes=200
+                depth=8,
+                n_heads=4,
+                mlp_dim=512,
+                num_classes=10
             ).to(device)
 
         model = torch.compile(model, mode="reduce-overhead")
@@ -279,7 +282,7 @@ def main():
             num_training_steps=total_steps
         )
 
-        suffix = "_img200_definitive"
+        suffix = "_multi_"
         checkpoint_path = f"/projects/0/prjs1528/vit_checkpoints/{patch_embed_name}{suffix}"
         os.makedirs(checkpoint_path, exist_ok=True)
         checkpoint_file = os.path.join(

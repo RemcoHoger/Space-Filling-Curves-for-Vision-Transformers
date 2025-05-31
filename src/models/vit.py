@@ -196,8 +196,8 @@ class VisionTransformer(nn.Module):
             hidden_dim=mlp_dim,
             n_layers=depth
         )
-        self.pos_embed = nn.Parameter(
-            torch.randn(1, self.patch_embed.n_patches, embed_dim))
+        # self.pos_embed = nn.Parameter(
+        #     torch.randn(1, self.patch_embed.n_patches, embed_dim))
         # self.ta = TokenAggregator(embed_dim)
         self.mlp_head = MultiLayerPredictor(
             embed_dim, self.patch_embed.n_patches, n_layers=2, num_classes=num_classes)
@@ -218,7 +218,7 @@ class VisionTransformer(nn.Module):
         """
         x = self.patch_embed(x)  # Convert image to patch embeddings
         # x = self.ta(x)           # Aggregate tokens
-        x = x + self.pos_embed[:x.size(1), :]  # Add positional embeddings
+        # x = x + self.pos_embed[:x.size(1), :]  # Add positional embeddings
         x = self.encoder(x)      # Encode patches using Transformer
         x = self.mlp_head(x)  # Classify using linear head
         return x
@@ -284,5 +284,70 @@ class VisionTransformer1D(nn.Module):
             torch.Tensor: Output logits of shape [B, num_classes].
         """
         x = self.patch_embed(x)  # [B, N, D]
+        x = self.encoder(x)      # [B, N*D]
+        return self.mlp_head(x)  # [B, num_classes]
+
+########################################################################
+# Hierarchical Vision Transformer
+########################################################################
+
+
+class HierarchicalVisionTransformer1D(nn.Module):
+    """
+    Vision Transformer (ViT) model for 1D data classification.
+
+    Args:
+        img_size (int): Size of the input image (assumes square images).
+        patch_size (int): Size of each patch (assumes square patches).
+        in_channels (int): Number of input channels (e.g., 3 for RGB images).
+        embed_dim (int): Dimensionality of the patch embeddings.
+        depth (int): Number of Transformer encoder layers.
+        n_heads (int): Number of attention heads.
+        mlp_dim (int): Dimensionality of the feedforward network.
+        num_classes (int): Number of output classes.
+    """
+
+    def __init__(
+        self,
+        patch_embed: BasePatchEmbedding,
+        embed_dim=128,
+        depth=6,
+        n_heads=4,
+        mlp_dim=256,
+        num_classes=10
+    ):
+        super().__init__()
+        self.patch_embed = patch_embed
+
+        embed_dim = patch_embed.embed_dim
+        self.encoder = TransformerSeqEncoder(
+            input_dim=embed_dim,
+            max_len=self.patch_embed.n_patches,
+            n_head=n_heads,
+            hidden_dim=mlp_dim,
+            n_layers=depth,
+            method=self.patch_embed
+        )
+
+        self.mlp_head = MultiLayerPredictor(
+            embed_dim,
+            self.patch_embed.n_patches,
+            n_layers=2,
+            dropout_p=0.5,
+            num_classes=num_classes
+        )
+
+    def forward(self, x):
+        """
+        Forward pass of the RasterScan1DViT.
+
+        Args:
+            x (torch.Tensor): Input tensor of shape [B, C, H, W].
+
+        Returns:
+            torch.Tensor: Output logits of shape [B, num_classes].
+        """
+        x = self.patch_embed(x)  # [B, N, D]
+        x = torch.cat(x, dim=1)  # Concatenate patches along the sequence dimension
         x = self.encoder(x)      # [B, N*D]
         return self.mlp_head(x)  # [B, num_classes]

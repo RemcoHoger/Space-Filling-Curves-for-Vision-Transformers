@@ -251,6 +251,25 @@ def moore_curve(order, size=1.0):
     return [tuple(np.dot(rotation_matrix, [x_i, y_i])) for x_i, y_i in points]
 
 
+def raster_curve(order, size=1.0):
+    """
+    Generate points for a raster (row-major) curve of a given order.
+    Args:
+        order (int): Order of the curve (depth of recursion).
+        size (float): Length of one side of the entire curve's square.
+    Returns:
+        List[Tuple[float, float]]: Ordered list of (x, y) points.
+    """
+    points = []
+    cell_size = size / (2 ** order)
+    for y in range(2 ** order):
+        for x in range(2 ** order):
+            # Calculate the center of each cell
+            x_center = (x + 0.5) * cell_size
+            y_center = (y + 0.5) * cell_size
+            points.append((x_center, y_center))
+    return points
+
 def find_hamiltonian_path(width, height, adjacency_order=None, diag=False):
     """
     Attempt to find a Hamiltonian path on a 2D grid with 8-way connectivity.
