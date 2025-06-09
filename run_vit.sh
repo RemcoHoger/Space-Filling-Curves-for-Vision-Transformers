@@ -1,12 +1,12 @@
 #!/bin/bash
 #SBATCH --job-name=test_multiscale_vit
-#SBATCH --output=logs/vit_multi_%j.out
-#SBATCH --error=logs/vit_multi_%j.err
+#SBATCH --output=logs/vit_quicktest_%j.out
+#SBATCH --error=logs/vit_quicktest_%j.err
 #SBATCH --partition=gpu_h100
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=64G
-#SBATCH --time=40:00:00
+#SBATCH --time=00:45:00
 
 # Load the modules
 module load 2024

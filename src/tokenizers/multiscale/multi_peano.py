@@ -3,11 +3,11 @@ import numpy as np
 import torch.nn as nn
 from functools import cache
 from einops import rearrange
-from src.curves.space_filling_curves import embed_and_prune_sfc, z_curve
+from src.curves.space_filling_curves import embed_and_prune_sfc, peano_curve
 
 
-class HierarchicalMortonEmbedding(nn.Module):
-    def __init__(self, img_size, in_channels, patch_size_list, embed_dim, curve_fn=z_curve):
+class HierarchicalPeanoEmbedding(nn.Module):
+    def __init__(self, img_size, in_channels, patch_size_list, embed_dim, curve_fn=peano_curve):
         super().__init__()
         self.levels = nn.ModuleList()
         pre_patch_size = 1
@@ -35,6 +35,7 @@ class HierarchicalMortonEmbedding(nn.Module):
             patches[i] = torch.nn.functional.interpolate(
                 patches[i].transpose(1, 2), size=n_tokens, mode='linear', align_corners=False
             ).transpose(1, 2)
+
         x = torch.cat(patches, dim=-1)  # [B, n_tokens, D * depth]
         return self.fusion(x)  # [B, n_tokens, D * depth]
 
@@ -60,8 +61,7 @@ class SFCEmbedding1D(nn.Module):
         self.input_dim = self.pre_patch_dim * group_patch_size
 
         # Register buffer for curve-based indices
-        self.register_buffer(
-            "sfc_indices", self._sfc_indices(self.grid_size).long())
+        self.register_buffer("sfc_indices", self._sfc_indices(self.grid_size).long())
 
         self.proj = nn.Linear(self.input_dim, embed_dim)
 

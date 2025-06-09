@@ -31,7 +31,12 @@ from src.tokenizers._1D.onion_embedding1D import OnionEmbedding1D
 from src.tokenizers._1D.morton_embedding1D import MortonEmbedding1D
 
 from src.tokenizers.multiscale.multi_morton import HierarchicalMortonEmbedding
-# from src.models.vit import VisionTransformer
+from src.tokenizers.multiscale.multi_zigzag import HierarchicalRasterScanEmbedding
+from src.tokenizers.multiscale.multi_hilbert import HierarchicalHilbertEmbedding
+from src.tokenizers.multiscale.multi_peano import HierarchicalPeanoEmbedding
+from src.tokenizers.multiscale.multi_moore import HierarchicalMooreEmbedding
+from src.tokenizers.multiscale.multi_onion import HierarchicalOnionEmbedding
+
 from transformers import get_cosine_schedule_with_warmup
 from src.models.vit import VisionTransformer1D, VisionTransformer, HierarchicalVisionTransformer1D
 from src.training.train import evaluate, train_with_mixup_or_cutmix
@@ -234,12 +239,22 @@ def main():
         # "zigzag": ZigzagEmbedding
     }
 
+    multiscale_patch_embed_dict = {
+        "raster": HierarchicalRasterScanEmbedding,
+        "hilbert": HierarchicalHilbertEmbedding,
+        "peano": HierarchicalPeanoEmbedding,
+        "moore": HierarchicalMooreEmbedding,
+        "onion": HierarchicalOnionEmbedding,
+        "morton": HierarchicalMortonEmbedding,
+        "zigzag": ZigzagEmbedding
+    }
+
     for patch_embed_name, patch_embed_class in patch_embed_dict.items():
         print(f"Using {patch_embed_name} embedding")
         if patch_embed_name == "zigzag":
             patch_embed = patch_embed_class(
                 img_size=32,
-                patch_size=4,
+                patch_size=3,
                 in_channels=3,
                 embed_dim=256
             )
@@ -254,10 +269,11 @@ def main():
             patch_embed = HierarchicalMortonEmbedding(
                 img_size=32,
                 in_channels=3,
-                patch_size_list=[16, 16, 16],
-                embed_dim_list=[256, 256, 256]
+                patch_size_list=[16, 4, 1],
+                embed_dim=256
             )
-            model = HierarchicalVisionTransformer1D(
+
+            model = VisionTransformer1D(
                 patch_embed=patch_embed,
                 depth=8,
                 n_heads=4,
@@ -272,6 +288,21 @@ def main():
         optimizer = optim.AdamW(
             model.parameters(), lr=3e-4, weight_decay=0.00005)
 
+        # # print out the size is megabytes per model layer
+        # print("Model size per layer:")
+        # for name, param in model.named_parameters():
+        #     if param.requires_grad:
+        #         size_mb = param.numel() * param.element_size() / (1024 ** 2)
+        #         print(f"{name}: {size_mb:.2f} MB")
+        # # print out the total size of the model in megabytes
+        # total_size_mb = sum(param.numel() * param.element_size()
+        #                     for param in model.parameters() if param.requires_grad) / (1024 ** 2)
+        # print(f"Total model size: {total_size_mb:.2f} MB")
+        # # print out the number of parameters in the model
+        # total_params = sum(param.numel()
+        #                    for param in model.parameters() if param.requires_grad)
+        # print(f"Total number of parameters: {total_params}")
+
         epochs = 300
         warmup_epochs = 10
         warmup_steps = warmup_epochs * len(train_loader)
@@ -282,7 +313,7 @@ def main():
             num_training_steps=total_steps
         )
 
-        suffix = "_multi_"
+        suffix = "_quicktest_"
         checkpoint_path = f"/projects/0/prjs1528/vit_checkpoints/{patch_embed_name}{suffix}"
         os.makedirs(checkpoint_path, exist_ok=True)
         checkpoint_file = os.path.join(
