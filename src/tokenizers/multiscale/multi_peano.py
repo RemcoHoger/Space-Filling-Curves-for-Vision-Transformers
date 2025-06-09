@@ -41,7 +41,7 @@ class HierarchicalPeanoEmbedding(nn.Module):
 
 
 class SFCEmbedding1D(nn.Module):
-    def __init__(self, img_size, pre_patch_size, group_patch_size, in_channels, embed_dim, curve_fn=z_curve):
+    def __init__(self, img_size, pre_patch_size, group_patch_size, in_channels, embed_dim, curve_fn=peano_curve):
         super().__init__()
 
         assert img_size % pre_patch_size == 0, "Image size must be divisible by pre_patch_size"
